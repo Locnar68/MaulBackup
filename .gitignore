@@ -1,0 +1,19 @@
+# Secrets and local-only files - NEVER commit these.
+config.json
+credentials.json
+token.json
+.backup_state.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Installer scratch
+_mk_shortcut.vbs
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

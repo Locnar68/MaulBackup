@@ -1,0 +1,16 @@
+{
+  "_comment": "Copy this to config.json and fill it in (install.bat does this for you). config.json is gitignored so the app password never reaches GitHub.",
+
+  "gmail_address": "sarahpepe68@gmail.com",
+  "gmail_app_password": "PASTE 16-CHARACTER GMAIL APP PASSWORD HERE",
+
+  "sender_filter": "2excelon4@gmail.com",
+  "source_mailbox": "INBOX",
+
+  "usb_label": "MichaelMaul Backup",
+  "usb_path": "",
+
+  "upload_to_drive": true,
+  "drive_folder_name": "MichaelMaul",
+  "drive_folder_id": ""
+}
