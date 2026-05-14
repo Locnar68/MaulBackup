@@ -413,34 +413,45 @@ def _select_mailbox(conn, mailbox, log):
     """Select an IMAP mailbox, trying a few name variants.
 
     Gmail's "All Mail" is special: the IMAP name has a space and brackets
-    ('[Gmail]/All Mail'), so it must be sent quoted. Some accounts also expose
-    it as '[Google Mail]/All Mail'. We try the configured name first, then a
-    quoted form, then the known Gmail variants, and finally fall back to
-    discovering it from the server's folder list.
+    ('[Gmail]/All Mail'), so it must be sent quoted. An unquoted name with a
+    space makes Gmail return BAD, which imaplib raises as an exception - so
+    every attempt is wrapped in try/except and we just move to the next
+    candidate. Quoted forms are tried first since those are the ones that work.
     """
-    candidates = [mailbox, f'"{mailbox}"']
-    lowered = mailbox.strip().strip('"').lower()
+    raw = mailbox.strip().strip('"')
+    lowered = raw.lower()
+
+    # Quoted forms first - those are what Gmail actually accepts.
+    candidates = [f'"{raw}"', raw]
     if lowered in ("all mail", "[gmail]/all mail", "[google mail]/all mail"):
-        candidates += ['"[Gmail]/All Mail"', '"[Google Mail]/All Mail"']
+        candidates = ['"[Gmail]/All Mail"', '"[Google Mail]/All Mail"',
+                      f'"{raw}"']
 
     for name in candidates:
-        typ, _ = conn.select(name, readonly=True)
-        if typ == "OK":
-            return True
+        try:
+            typ, _ = conn.select(name, readonly=True)
+            if typ == "OK":
+                return True
+        except imaplib.IMAP4.error:
+            continue  # BAD/NO for this variant - try the next one
 
     # Last resort: ask the server which folder has the \All attribute.
     try:
         typ, boxes = conn.list()
         if typ == "OK" and boxes:
-            for raw in boxes:
-                line = raw.decode(errors="replace") if isinstance(raw, bytes) \
-                    else raw
+            for entry in boxes:
+                line = entry.decode(errors="replace") \
+                    if isinstance(entry, bytes) else entry
                 if "\\All" in line:
                     m = re.search(r'"([^"]+)"\s*$', line)
                     if m:
-                        typ, _ = conn.select(f'"{m.group(1)}"', readonly=True)
-                        if typ == "OK":
-                            return True
+                        try:
+                            typ, _ = conn.select(f'"{m.group(1)}"',
+                                                 readonly=True)
+                            if typ == "OK":
+                                return True
+                        except imaplib.IMAP4.error:
+                            continue
     except Exception:
         pass
     return False
