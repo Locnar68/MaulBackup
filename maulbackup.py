@@ -12,7 +12,8 @@ When you run it (via the desktop button or `python maulbackup.py --cli`) it:
         - a readable PDF                 (USB\MichaelMaul Backup\Saved as PDF)
         - a plain-text copy with header  (\Saved as Text)
         - any attachments                (\Attachments)
-  4. Uploads each PDF to the Google Drive folder "MichaelMaul".
+  4. After the USB backup, copies ALL PDFs on the USB to the Google Drive
+     folder "MichaelMaul" - uploading any that aren't already there.
   5. Records what it did so re-runs only pick up new mail.
 
 Email -> [button] -> USB (PDF / text / attachments) + Google Drive (PDFs)
@@ -628,6 +629,61 @@ def upload_pdf_to_drive(service, folder_id, pdf_path, log):
         return False
 
 
+def list_drive_pdf_names(service, folder_id, log):
+    """Return the set of file names already present in the Drive folder.
+
+    Used so the sync step can skip PDFs that are already uploaded - no
+    duplicates, and it makes the sync safe to run every time.
+    """
+    names = set()
+    page_token = None
+    try:
+        while True:
+            resp = service.files().list(
+                q=f"'{folder_id}' in parents and trashed=false",
+                spaces="drive", fields="nextPageToken, files(name)",
+                pageToken=page_token, pageSize=1000).execute()
+            for f in resp.get("files", []):
+                names.add(f["name"])
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+    except Exception as e:
+        log(f"Could not list the Drive folder contents: {e}")
+        # Return whatever we got; worst case we re-upload a few. Not fatal.
+    return names
+
+
+def sync_pdfs_to_drive(service, folder_id, pdf_folder, log):
+    """Make the Drive folder a complete copy of the USB 'Saved as PDF' folder.
+
+    Scans every PDF on the USB drive and uploads any that aren't already in
+    the Drive folder (matched by file name). This is decoupled from the
+    per-email backup state on purpose: if Drive was unreachable on an earlier
+    run, this step quietly catches up the next time. Returns (uploaded,
+    already_there) counts.
+    """
+    pdf_folder = Path(pdf_folder)
+    local_pdfs = sorted(pdf_folder.glob("*.pdf"))
+    if not local_pdfs:
+        log("No PDFs on the USB drive yet - nothing to copy to Drive.")
+        return 0, 0
+
+    existing = list_drive_pdf_names(service, folder_id, log)
+    uploaded = 0
+    already = 0
+    log(f"Copying PDFs to Google Drive ({len(local_pdfs)} on USB, "
+        f"{len(existing)} already in Drive) ...")
+    for pdf in local_pdfs:
+        if pdf.name in existing:
+            already += 1
+            continue
+        if upload_pdf_to_drive(service, folder_id, pdf, log):
+            uploaded += 1
+            log(f"  -> uploaded {pdf.name}")
+    return uploaded, already
+
+
 # ===========================================================================
 # The actual backup run
 # ===========================================================================
@@ -673,6 +729,7 @@ def run_backup(config_path=None, gui_callback=None, dry_run=False):
             drive_service = None
 
     new_count = saved_pdf = saved_txt = saved_att = uploaded = 0
+    already_there = 0
 
     try:
         log(f"\nSearching mailboxes: "
@@ -744,15 +801,19 @@ def run_backup(config_path=None, gui_callback=None, dry_run=False):
                                          base_name, attachments)
                 saved_att += len(files)
 
-            if drive_service and drive_folder_id:
-                if upload_pdf_to_drive(drive_service, drive_folder_id,
-                                       pdf_path, log):
-                    uploaded += 1
-
             processed.add(key)
 
         if not dry_run:
             save_state(usb_path, processed)
+
+        # --- copy ALL PDFs on the USB to Google Drive ----------------------
+        # Done as a separate pass (not per-email) so it is decoupled from the
+        # backup state file. That makes it self-healing: anything missing from
+        # Drive - because Drive was down on an earlier run, or because the
+        # state file already had the email marked done - gets caught up here.
+        if drive_service and drive_folder_id and not dry_run:
+            uploaded, already_there = sync_pdfs_to_drive(
+                drive_service, drive_folder_id, folders["pdf"], log)
 
     finally:
         try:
@@ -771,10 +832,13 @@ def run_backup(config_path=None, gui_callback=None, dry_run=False):
         log(f"  PDFs saved to USB        : {saved_pdf}")
         log(f"  Text files saved to USB  : {saved_txt}")
         log(f"  Attachments saved to USB : {saved_att}")
-        log(f"  PDFs uploaded to Drive   : {uploaded}")
+        if drive_service and drive_folder_id:
+            log(f"  PDFs uploaded to Drive   : {uploaded} "
+                f"({already_there} already there)")
+        elif cfg["upload_to_drive"]:
+            log("  PDFs uploaded to Drive   : 0 (Drive was skipped - "
+                "see messages above)")
         log(f"  USB location             : {usb_path}")
-        if cfg["upload_to_drive"] and not drive_service:
-            log("  (Google Drive upload was skipped - see messages above.)")
     log("-" * 60)
 
     return {
