@@ -5,8 +5,8 @@
   "gmail_app_password": "PASTE 16-CHARACTER GMAIL APP PASSWORD HERE",
 
   "sender_filter": "2excelon4@gmail.com",
-  "source_mailbox": "[Gmail]/All Mail",
-  "_source_mailbox_note": "[Gmail]/All Mail searches everything - inbox, archived, AND labeled mail - so it finds messages no matter which Gmail label they're filed under. The sender_filter still limits results to just that sender.",
+  "source_mailboxes": ["Michael Maul", "Michael Maul After 4/26"],
+  "_source_mailboxes_note": "The Gmail labels to back up. List as many as you want - the tool reads each one and de-duplicates. These must match the label names EXACTLY as Gmail shows them over IMAP. To see the exact names, run: python -c \"import imaplib,json; c=json.load(open('config.json')); m=imaplib.IMAP4_SSL('imap.gmail.com',993); m.login(c['gmail_address'],c['gmail_app_password']); [print(x) for x in m.list()[1]]; m.logout()\"",
 
   "usb_label": "MichaelMaul Backup",
   "usb_path": "",

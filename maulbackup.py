@@ -96,7 +96,17 @@ def load_config(path, log):
     with open(path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    cfg.setdefault("source_mailbox", "[Gmail]/All Mail")
+    # source_mailboxes is the new (list) form. Accept the old single
+    # "source_mailbox" string too, so existing configs keep working.
+    if "source_mailboxes" not in cfg:
+        legacy = cfg.get("source_mailbox")
+        if isinstance(legacy, str) and legacy.strip():
+            cfg["source_mailboxes"] = [legacy.strip()]
+        else:
+            cfg["source_mailboxes"] = ["Michael Maul",
+                                       "Michael Maul After 4/26"]
+    if isinstance(cfg["source_mailboxes"], str):
+        cfg["source_mailboxes"] = [cfg["source_mailboxes"]]
     cfg.setdefault("usb_label", "MichaelMaul Backup")
     cfg.setdefault("usb_path", "")
     cfg.setdefault("drive_folder_name", "MichaelMaul")
@@ -409,65 +419,89 @@ def connect_gmail(cfg, log):
     return conn
 
 
-def _select_mailbox(conn, mailbox, log):
-    """Select an IMAP mailbox, trying a few name variants.
+def _selectable_mailboxes(conn):
+    """Return the set of mailbox names the server says we CAN select.
 
-    Gmail's "All Mail" is special: the IMAP name has a space and brackets
-    ('[Gmail]/All Mail'), so it must be sent quoted. An unquoted name with a
-    space makes Gmail return BAD, which imaplib raises as an exception - so
-    every attempt is wrapped in try/except and we just move to the next
-    candidate. Quoted forms are tried first since those are the ones that work.
+    Gmail marks phantom parent folders (created by a '/' in a label name)
+    with \\Noselect - trying to open those fails. This lets us skip them.
     """
-    raw = mailbox.strip().strip('"')
-    lowered = raw.lower()
-
-    # Quoted forms first - those are what Gmail actually accepts.
-    candidates = [f'"{raw}"', raw]
-    if lowered in ("all mail", "[gmail]/all mail", "[google mail]/all mail"):
-        candidates = ['"[Gmail]/All Mail"', '"[Google Mail]/All Mail"',
-                      f'"{raw}"']
-
-    for name in candidates:
-        try:
-            typ, _ = conn.select(name, readonly=True)
-            if typ == "OK":
-                return True
-        except imaplib.IMAP4.error:
-            continue  # BAD/NO for this variant - try the next one
-
-    # Last resort: ask the server which folder has the \All attribute.
+    selectable = set()
     try:
         typ, boxes = conn.list()
         if typ == "OK" and boxes:
             for entry in boxes:
                 line = entry.decode(errors="replace") \
                     if isinstance(entry, bytes) else entry
-                if "\\All" in line:
-                    m = re.search(r'"([^"]+)"\s*$', line)
-                    if m:
-                        try:
-                            typ, _ = conn.select(f'"{m.group(1)}"',
-                                                 readonly=True)
-                            if typ == "OK":
-                                return True
-                        except imaplib.IMAP4.error:
-                            continue
+                m = re.search(r'"([^"]*)"\s*$', line)
+                if not m:
+                    continue
+                name = m.group(1)
+                if "\\Noselect" in line:
+                    continue
+                selectable.add(name)
     except Exception:
         pass
+    return selectable
+
+
+def _select_mailbox(conn, mailbox):
+    """Try to select one mailbox. Returns True on success, False otherwise.
+
+    Names with spaces must be sent quoted; an unquoted name makes Gmail
+    return BAD, which imaplib raises - so each attempt is wrapped.
+    """
+    raw = mailbox.strip().strip('"')
+    for name in (f'"{raw}"', raw):
+        try:
+            typ, _ = conn.select(name, readonly=True)
+            if typ == "OK":
+                return True
+        except imaplib.IMAP4.error:
+            continue
     return False
 
 
-def search_sender(conn, mailbox, sender, log):
-    if not _select_mailbox(conn, mailbox, log):
-        log(f"Could not open mailbox '{mailbox}'.")
-        if "all mail" in mailbox.lower():
-            log("Tip: in config.json, source_mailbox should be the Gmail")
-            log("special folder name. '[Gmail]/All Mail' is the usual value.")
+def search_senders(conn, mailboxes, sender, log):
+    """Search every configured mailbox for mail from `sender`.
+
+    Returns a list of (mailbox, uid) pairs. Mailboxes that can't be opened
+    are reported and skipped rather than aborting the whole run.
+    """
+    selectable = _selectable_mailboxes(conn)
+    results = []
+    opened_any = False
+
+    for mailbox in mailboxes:
+        target = mailbox.strip().strip('"')
+        # Warn (but still try) if the server's list didn't show it as selectable.
+        if selectable and target not in selectable:
+            log(f"Note: '{target}' is not in the selectable folder list - "
+                f"trying anyway.")
+        if not _select_mailbox(conn, target):
+            log(f"Could not open mailbox '{target}' - skipping it.")
+            continue
+        opened_any = True
+        typ, data = conn.uid("search", None, f'(FROM "{sender}")')
+        if typ != "OK" or not data or not data[0]:
+            log(f"  '{target}': 0 message(s) from {sender}.")
+            continue
+        uids = data[0].split()
+        log(f"  '{target}': {len(uids)} message(s) from {sender}.")
+        for uid in uids:
+            results.append((target, uid))
+
+    if not opened_any:
+        log("None of the configured mailboxes could be opened.")
+        log("Check 'source_mailboxes' in config.json against the label names")
+        log("shown in Gmail. Run this to list them:")
+        log('  python -c "import imaplib,json; '
+            "c=json.load(open('config.json')); "
+            "m=imaplib.IMAP4_SSL('imap.gmail.com',993); "
+            "m.login(c['gmail_address'],c['gmail_app_password']); "
+            '[print(x) for x in m.list()[1]]; m.logout()"')
         raise SystemExit(1)
-    typ, data = conn.uid("search", None, f'(FROM "{sender}")')
-    if typ != "OK" or not data or not data[0]:
-        return []
-    return data[0].split()
+
+    return results
 
 
 # ===========================================================================
@@ -641,20 +675,35 @@ def run_backup(config_path=None, gui_callback=None, dry_run=False):
     new_count = saved_pdf = saved_txt = saved_att = uploaded = 0
 
     try:
-        uids = search_sender(conn, cfg["source_mailbox"],
-                             cfg["sender_filter"], log)
-        log(f"\nFound {len(uids)} message(s) from {cfg['sender_filter']}.")
+        log(f"\nSearching mailboxes: "
+            f"{', '.join(cfg['source_mailboxes'])}")
+        hits = search_senders(conn, cfg["source_mailboxes"],
+                              cfg["sender_filter"], log)
+        log(f"Total: {len(hits)} message(s) from {cfg['sender_filter']} "
+            f"across all mailboxes.")
 
-        for uid in uids:
+        current_mailbox = None
+        seen_keys = set()  # de-dupe within this run (same mail under 2 labels)
+
+        for mailbox, uid in hits:
+            # Re-select the mailbox when it changes - UIDs are per-mailbox.
+            if mailbox != current_mailbox:
+                if not _select_mailbox(conn, mailbox):
+                    log(f"Could not re-open '{mailbox}' - skipping its mail.")
+                    current_mailbox = None
+                    continue
+                current_mailbox = mailbox
+
             typ, msg_data = conn.uid("fetch", uid, "(RFC822)")
             if typ != "OK" or not msg_data or not msg_data[0]:
                 continue
             msg = email.message_from_bytes(msg_data[0][1])
 
             message_id = (msg.get("Message-ID") or "").strip()
-            key = message_id or f"uid:{uid.decode()}"
-            if key in processed:
+            key = message_id or f"{mailbox}:uid:{uid.decode()}"
+            if key in processed or key in seen_keys:
                 continue
+            seen_keys.add(key)
             new_count += 1
 
             subject = decode_mime(msg.get("Subject")) or "no-subject"
