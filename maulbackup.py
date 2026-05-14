@@ -103,7 +103,7 @@ def load_config(path, log):
         if isinstance(legacy, str) and legacy.strip():
             cfg["source_mailboxes"] = [legacy.strip()]
         else:
-            cfg["source_mailboxes"] = ["Michael Maul",
+            cfg["source_mailboxes"] = ["INBOX", "Michael Maul",
                                        "Michael Maul After 4/26"]
     if isinstance(cfg["source_mailboxes"], str):
         cfg["source_mailboxes"] = [cfg["source_mailboxes"]]
