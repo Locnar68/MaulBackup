@@ -96,7 +96,7 @@ def load_config(path, log):
     with open(path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    cfg.setdefault("source_mailbox", "INBOX")
+    cfg.setdefault("source_mailbox", "[Gmail]/All Mail")
     cfg.setdefault("usb_label", "MichaelMaul Backup")
     cfg.setdefault("usb_path", "")
     cfg.setdefault("drive_folder_name", "MichaelMaul")
@@ -409,10 +409,49 @@ def connect_gmail(cfg, log):
     return conn
 
 
+def _select_mailbox(conn, mailbox, log):
+    """Select an IMAP mailbox, trying a few name variants.
+
+    Gmail's "All Mail" is special: the IMAP name has a space and brackets
+    ('[Gmail]/All Mail'), so it must be sent quoted. Some accounts also expose
+    it as '[Google Mail]/All Mail'. We try the configured name first, then a
+    quoted form, then the known Gmail variants, and finally fall back to
+    discovering it from the server's folder list.
+    """
+    candidates = [mailbox, f'"{mailbox}"']
+    lowered = mailbox.strip().strip('"').lower()
+    if lowered in ("all mail", "[gmail]/all mail", "[google mail]/all mail"):
+        candidates += ['"[Gmail]/All Mail"', '"[Google Mail]/All Mail"']
+
+    for name in candidates:
+        typ, _ = conn.select(name, readonly=True)
+        if typ == "OK":
+            return True
+
+    # Last resort: ask the server which folder has the \All attribute.
+    try:
+        typ, boxes = conn.list()
+        if typ == "OK" and boxes:
+            for raw in boxes:
+                line = raw.decode(errors="replace") if isinstance(raw, bytes) \
+                    else raw
+                if "\\All" in line:
+                    m = re.search(r'"([^"]+)"\s*$', line)
+                    if m:
+                        typ, _ = conn.select(f'"{m.group(1)}"', readonly=True)
+                        if typ == "OK":
+                            return True
+    except Exception:
+        pass
+    return False
+
+
 def search_sender(conn, mailbox, sender, log):
-    typ, _ = conn.select(mailbox, readonly=True)
-    if typ != "OK":
+    if not _select_mailbox(conn, mailbox, log):
         log(f"Could not open mailbox '{mailbox}'.")
+        if "all mail" in mailbox.lower():
+            log("Tip: in config.json, source_mailbox should be the Gmail")
+            log("special folder name. '[Gmail]/All Mail' is the usual value.")
         raise SystemExit(1)
     typ, data = conn.uid("search", None, f'(FROM "{sender}")')
     if typ != "OK" or not data or not data[0]:

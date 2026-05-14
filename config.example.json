@@ -5,7 +5,8 @@
   "gmail_app_password": "PASTE 16-CHARACTER GMAIL APP PASSWORD HERE",
 
   "sender_filter": "2excelon4@gmail.com",
-  "source_mailbox": "INBOX",
+  "source_mailbox": "[Gmail]/All Mail",
+  "_source_mailbox_note": "[Gmail]/All Mail searches everything - inbox, archived, AND labeled mail - so it finds messages no matter which Gmail label they're filed under. The sender_filter still limits results to just that sender.",
 
   "usb_label": "MichaelMaul Backup",
   "usb_path": "",
